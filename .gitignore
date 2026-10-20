@@ -1,4 +1,7 @@
 .settings.json
+# Local login files written by scripts/set_lde_password.py --no-aws (docs/settings.md)
+.lde-basic-auth.json
+.lde-admin.txt
 *.db
 *.db-wal
 *.db-shm

@@ -54,7 +54,7 @@ resource "aws_secretsmanager_secret_version" "gemini_api_key" {
 
 resource "aws_secretsmanager_secret" "basic_auth" {
   name                    = "lde/basic-auth"
-  description             = "HTTP Basic Auth for LDE. JSON object {username: sha256_hex}, written by scripts/set_lde_password.py before the first plan."
+  description             = "HTTP Basic Auth for LDE. JSON object {username: pbkdf2_sha256$...}, written by scripts/set_lde_password.py before the first plan."
   recovery_window_in_days = 7
 }
 

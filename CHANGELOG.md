@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `POST /api/extract-packages {url}` now checks every hop of a fetch before connecting: a redirect to a private, loopback, link-local, multicast, shared-range (100.64.0.0/10) or non-80/443 target is refused before any request reaches it, and the connection is made to the address that passed the check, so a DNS-rebinding name cannot pass the check with one answer and connect with another. Before this, only the first URL was checked before the request, a redirect target was fetched first and checked after, and 100.64.0.0/10 passed. A response body is capped at 8 MB.
+- `basic_auth_credentials` in `.settings.json` (or `LDE_BASIC_AUTH_CREDENTIALS`) now activates the login gate locally, as the docs said. The loader dropped the key, so a local server configured with a password still served without one.
+- Passwords are stored as salted PBKDF2-HMAC-SHA256 (`pbkdf2_sha256$600000$<salt>$<hash>`, `backend/passwords.py`) by `scripts/set_lde_password.py`. The unsalted `sha256` hex of earlier secrets still verifies, with one warning per user in the server log and a WARN from `check_aws.py verify`. A verified password is remembered in memory for five minutes, keyed by the stored hash; failed attempts are never cached.
+- A negative or non-numeric `Content-Length` is a 400. `rfile.read(-1)` previously blocked the handler thread until the client closed the connection.
+- `GET /api/runs/{id}/logs/{org}/{repo}` validates the org and repo like the other per-repo endpoints and refuses a path that resolves outside the run's directory.
+- `PUT /api/settings` rejects a `gemini_model` with characters outside `[A-Za-z0-9._-]`, a `dtrack_url`/`dtrack_ui_url` that is not an http(s) URL, and a `default_orgs` that is not a list of organization names. The model name is also URL-quoted in the Gemini request path.
+- The "Not found" and error cards in the SPA HTML-escape the path and message they show.
 - Basic Auth compares the password hash in constant time (`hmac.compare_digest`), and a malformed stored hash returns 401 instead of raising.
 - Behind the ALB (`X-Forwarded-Proto: https`), responses send `Strict-Transport-Security: max-age=63072000; includeSubDomains`. Plain-HTTP local runs don't.
 - Finished background tasks that are never polled are dropped after 15 minutes, freeing their stored payloads.
@@ -22,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The dev auto-reloader ignores dot-files. Saving Settings rewrote `.settings.json`, which restarted the server and killed every in-flight run and background extraction.
+- `POST /api/extract-packages` returns 400 instead of 500 when `url` is not a string.
+- `secrets_loader` signs with an aware UTC timestamp (`datetime.utcnow()` is deprecated in Python 3.12).
 - `POST /api/runs` with only `org/repo` entries no longer fails with "No orgs provided" when `default_orgs` is empty, as on a fresh AWS deploy.
 - Port 80 on the ALB redirects to HTTPS when the certificates come from `listener_certificate_arns`. It returned 404 unless `route53_zone_id` was set.
 

@@ -25,6 +25,9 @@ import urllib.error
 import urllib.request
 
 SERVE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, SERVE_DIR)
+from backend import passwords  # noqa: E402
+
 TF_DIR = os.path.join(SERVE_DIR, 'terraform')
 BASIC_AUTH_FILE = os.path.expanduser('~/.lde/basic-auth.json')
 LDE_LOGIN_FILE = os.path.expanduser('~/.lde/lde-admin.txt')
@@ -393,9 +396,14 @@ def secret_shape(secret_id, value):
         except ValueError:
             return 'FAIL', f'{secret_id} is not JSON'
         if not isinstance(doc, dict) or not doc or not all(
-                isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in doc.values()):
-            return 'FAIL', f'{secret_id} must map each username to a 64-char sha256 hex'
-        return 'OK', f'{secret_id}: {len(doc)} user(s), sha256 hashes'
+                passwords.is_valid_stored_hash(h) for h in doc.values()):
+            return 'FAIL', (f'{secret_id} must map each username to a pbkdf2_sha256$ hash '
+                            f'(scripts/set_lde_password.py) or a 64-char sha256 hex')
+        legacy = sum(1 for h in doc.values() if passwords.is_legacy_hash(h))
+        if legacy:
+            return 'WARN', (f'{secret_id}: {len(doc)} user(s), {legacy} with an unsalted sha256 '
+                            f'hash; re-run scripts/set_lde_password.py to store a salted hash')
+        return 'OK', f'{secret_id}: {len(doc)} user(s), salted pbkdf2 hashes'
     if secret_id == 'lde/github-pat' and not value.startswith(('github_pat_', 'ghp_')):
         return 'WARN', f'{secret_id}: {len(value)} chars, no github_pat_ or ghp_ prefix'
     return 'OK', f'{secret_id}: {len(value)} chars'

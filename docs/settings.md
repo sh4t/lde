@@ -85,18 +85,34 @@ Change this when Google retires the current model. Override without redeploying 
 
 ---
 
-## Access control (AWS / Secrets Manager only)
+## Access control
 
 `basic_auth_credentials` is not in the `ALLOWED_KEYS` allowlist and cannot be set via
-`.settings.json` or `PUT /api/settings`. It is injected exclusively by the Secrets Manager
-overlay at startup.
+`PUT /api/settings`: the UI must never be able to change the login that protects it. It is
+read from, in order of precedence, the `LDE_BASIC_AUTH_CREDENTIALS` environment variable, the
+Secrets Manager overlay (`lde/basic-auth`, AWS only) and `.settings.json`.
 
 | Key | Type | AWS secret |
 |---|---|---|
-| `basic_auth_credentials` | JSON object `{"<username>": "<sha256_hex>"}` | `lde/basic-auth` |
+| `basic_auth_credentials` | JSON object `{"<username>": "<hash>"}` (or that object as a JSON string) | `lde/basic-auth` |
+
+`<hash>` is what `scripts/set_lde_password.py` writes: `pbkdf2_sha256$<iterations>$<salt>$<hash>`,
+a salted PBKDF2-HMAC-SHA256 hash (600,000 iterations). The unsalted 64-character `sha256(password)`
+hex that earlier versions stored is still accepted; the server logs one warning per user asking
+for the secret to be rewritten with the script.
 
 When absent (local dev), all endpoints are unauthenticated. When present, every request requires
-HTTP Basic Auth with a password whose SHA-256 hex matches the stored hash.
+HTTP Basic Auth with a password that verifies against the stored hash. A verified password is
+remembered in memory for five minutes, keyed by the stored hash, so rotating the secret ends the
+old password within a minute of the server reading the new value.
+
+Local gate:
+
+```bash
+python3 scripts/set_lde_password.py --no-aws --out ./.lde-basic-auth.json --plaintext-out ./.lde-admin.txt
+# paste the JSON object from ./.lde-basic-auth.json into .settings.json as basic_auth_credentials,
+# or export LDE_BASIC_AUTH_CREDENTIALS="$(cat ./.lde-basic-auth.json)"
+```
 
 See [runbook-secrets-rotation.md](runbook-secrets-rotation.md) for instructions on rotating the
 password hash.

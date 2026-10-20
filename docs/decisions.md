@@ -98,8 +98,12 @@ container filesystem.
 
 ## 6. Basic Auth instead of a session-based auth system
 
-**Decision:** HTTP Basic Auth over HTTPS, with SHA-256 password hashes stored in
-Secrets Manager. No sessions, no cookies, no OAuth.
+**Decision:** HTTP Basic Auth over HTTPS, with salted PBKDF2-HMAC-SHA256 password hashes
+(`backend/passwords.py`, written by `scripts/set_lde_password.py`) stored in Secrets Manager.
+No sessions, no cookies, no OAuth. The unsalted SHA-256 hex of the first release is still
+verified so existing secrets keep working. Verified passwords are remembered in memory for
+five minutes, keyed by the stored hash, so the per-request cost of Basic Auth stays near zero
+while every failed attempt pays the full PBKDF2 cost.
 
 **Why:**
 LDE is an internal tool accessed by a small ops team. It lives behind an ALB with an ACM

@@ -8,8 +8,6 @@ Serves on http://localhost:8002 by default.
 import argparse
 import base64
 import concurrent.futures
-import hashlib
-import hmac
 import json
 import mimetypes
 import os
@@ -27,6 +25,7 @@ from backend import (
     gh_auth,
     github_client,
     log as log_mod,
+    passwords,
     pipeline,
     sanitizer,
     settings as settings_mod,
@@ -105,6 +104,23 @@ def _get_basic_auth_creds():
     return _load_basic_auth_creds()
 
 
+_legacy_hash_warned = set()
+_legacy_hash_lock = threading.Lock()
+
+
+def _warn_legacy_hash_once(user, stored):
+    """Log once per user when the stored hash is the unsalted sha256 format."""
+    if not passwords.is_legacy_hash(stored):
+        return
+    with _legacy_hash_lock:
+        if user in _legacy_hash_warned:
+            return
+        _legacy_hash_warned.add(user)
+    logger.warning('basic_auth_credentials for %r is an unsalted sha256 hash; re-run '
+                   'scripts/set_lde_password.py to store a salted PBKDF2 hash',
+                   log_mod.safe(user))
+
+
 ROUTES = [
     ('GET',  r'^/api/settings$',                                'handle_get_settings'),
     ('PUT',  r'^/api/settings$',                                'handle_put_settings'),
@@ -136,8 +152,37 @@ ROUTES = [
 ]
 
 
-_ID_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+# GitHub org/repo names: no path separators, and never just dots.
+_ID_RE = re.compile(r'^(?!\.+$)[A-Za-z0-9._-]+$')
 _BRANCH_RE = re.compile(r'^[A-Za-z0-9._/-]+$')
+# Gemini model names are a single URL path segment (gemini-3.8-flash).
+_GEMINI_MODEL_RE = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
+_URL_SETTINGS = ('dtrack_url', 'dtrack_ui_url')
+
+
+def _validate_settings_patch(patch):
+    """Reject a PUT /api/settings body that would break a URL or API path.
+
+    Values are only ever used by the server itself, but a model name with a
+    slash would change which Google endpoint is called, and a Dependency-Track
+    URL without an http(s) scheme can never be reached.
+    """
+    model = patch.get('gemini_model')
+    if model is not None and model != '' and (
+            not isinstance(model, str) or not _GEMINI_MODEL_RE.match(model)):
+        raise ValueError('gemini_model may contain only letters, digits, ".", "_" and "-"')
+    for key in _URL_SETTINGS:
+        value = patch.get(key)
+        if value is None or value == '':
+            continue
+        parsed = urlparse(value) if isinstance(value, str) else None
+        if parsed is None or parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError(f'{key} must be an http:// or https:// URL')
+    orgs = patch.get('default_orgs')
+    if orgs is not None:
+        if not isinstance(orgs, list) or not all(
+                isinstance(o, str) and _ID_RE.match(o) for o in orgs):
+            raise ValueError('default_orgs must be a list of GitHub organization names')
 
 
 def _validate_org_repo(org, repo):
@@ -265,12 +310,12 @@ class Handler(BaseHTTPRequestHandler):
         if not expected_hash:
             self._send_auth_challenge()
             return False
-        actual_hash = hashlib.sha256(pw.encode('utf-8')).hexdigest()
-        # Compare bytes: compare_digest raises TypeError on non-ASCII str, and a
-        # malformed stored value must deny (401), not escape as an exception.
-        if not hmac.compare_digest(actual_hash.encode('ascii'), str(expected_hash).encode('utf-8')):
+        # Salted PBKDF2 (scripts/set_lde_password.py) or the legacy unsalted
+        # sha256 hex. A malformed stored value denies (401), never raises.
+        if not passwords.verify_password(pw, expected_hash):
             self._send_auth_challenge()
             return False
+        _warn_legacy_hash_once(user, expected_hash)
         return True
 
     def _send_auth_challenge(self):
@@ -325,7 +370,13 @@ class Handler(BaseHTTPRequestHandler):
     _MAX_BODY = 1 * 1024 * 1024
 
     def _read_body(self):
-        length = int(self.headers.get('Content-Length', 0))
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except (TypeError, ValueError):
+            raise ValueError('Invalid Content-Length header') from None
+        if length < 0:
+            # rfile.read(-1) would block until the client closes the socket.
+            raise ValueError('Invalid Content-Length header')
         if length == 0:
             return {}
         if length > self._MAX_BODY:
@@ -402,6 +453,7 @@ class Handler(BaseHTTPRequestHandler):
         unknown = set(patch.keys()) - settings_mod.ALLOWED_KEYS
         if unknown:
             raise ValueError(f'Unknown settings keys: {sorted(unknown)}')
+        _validate_settings_patch(patch)
         updated = settings_mod.save_settings(patch)
         self._json_response(200, settings_mod.masked(updated))
 
@@ -486,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
         repos_raw = body.get('repos') or []
         if not isinstance(repos_raw, list):
             raise ValueError('repos must be a list')
-        _REPO_RE = re.compile(r'^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?$')
+        _REPO_RE = re.compile(r'^(?!\.+(/|$))[A-Za-z0-9._-]+(/(?!\.+$)[A-Za-z0-9._-]+)?$')
         for r in repos_raw:
             if not isinstance(r, str) or not r.strip() or not _REPO_RE.match(r.strip()):
                 raise ValueError(
@@ -714,8 +766,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_get_repo_log(self, groups, qs):
         run_id, org, repo = groups
-        log_path = os.path.join(DATA_DIR, 'runs', run_id, f'{org}__{repo}.log')
-        if not os.path.isfile(log_path):
+        _validate_org_repo(org, repo)
+        run_dir = os.path.realpath(os.path.join(DATA_DIR, 'runs', run_id))
+        log_path = os.path.realpath(os.path.join(run_dir, f'{org}__{repo}.log'))
+        if not log_path.startswith(run_dir + os.sep) or not os.path.isfile(log_path):
             self._json_response(404, {'error': 'Log not found'})
             return
         with open(log_path, 'r', errors='replace') as f:
@@ -1144,9 +1198,10 @@ class Handler(BaseHTTPRequestHandler):
             filename = str(body.get('filename', '')).strip()
             task_id = task_queue.submit(package_extractor.run_from_text, raw, filename, gemini_key, gemini_model)
         else:
-            url = body.get('url', '').strip()
-            if not url:
+            url = body.get('url', '')
+            if not isinstance(url, str) or not url.strip():
                 raise ValueError('Request body must contain either "url" or "text"')
+            url = url.strip()
             if len(url) > 2048:
                 raise ValueError('URL too long (max 2048 chars)')
             task_id = task_queue.submit(package_extractor.run, url, gemini_key, gemini_model)
@@ -1234,6 +1289,11 @@ def _collect_mtimes():
         dirs[:] = [d for d in dirs
                    if d not in _IGNORE_NAMES and not d.startswith('.')]
         for fname in files:
+            # Dot-files are config or state, not source: .settings.json is
+            # rewritten by PUT /api/settings, and restarting on that save
+            # would kill every in-flight run and background task.
+            if fname.startswith('.'):
+                continue
             _, ext = os.path.splitext(fname)
             if ext not in _WATCH_EXTENSIONS:
                 continue

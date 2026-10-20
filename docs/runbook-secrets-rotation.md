@@ -138,24 +138,25 @@ curl -su "$BASIC_AUTH" -X POST "$ALB/api/dtrack/package-search" \
 
 ## Rotating the Basic Auth password
 
-Basic Auth credentials are stored as a JSON string of `{username: sha256_hex}` pairs.
+Basic Auth credentials are stored as a JSON object of `{username: hash}` pairs, where the
+hash is the salted PBKDF2 string `scripts/set_lde_password.py` writes
+(`pbkdf2_sha256$600000$<salt>$<hash>`). The unsalted `sha256_hex` that older secrets hold
+still verifies; `check_aws.py verify` reports WARN until it is rewritten.
 
-1. Generate the new hash on your local machine (not in a CI log):
+1. Generate the hash and store it, on your local machine (not in a CI log). The script
+   prompts for the password, writes `~/.lde/basic-auth.json` and `~/.lde/lde-admin.txt`
+   (mode 0600), and calls `put-secret-value` when `lde/basic-auth` already exists:
 
    ```bash
-   python3 -c "
-   import hashlib, json, getpass
-   pw = getpass.getpass('New password: ')
-   print(json.dumps({'admin': hashlib.sha256(pw.encode()).hexdigest()}))
-   "
+   python3 scripts/set_lde_password.py --region us-east-1
    ```
 
-2. Put the JSON string in Secrets Manager:
+2. Or write the secret yourself from a hash the script produced with `--no-aws`:
 
    ```bash
    aws secretsmanager put-secret-value \
      --secret-id lde/basic-auth \
-     --secret-string '{"admin":"<sha256_hex>"}' \
+     --secret-string file://$HOME/.lde/basic-auth.json \
      --region us-east-1 --profile your-profile
    ```
 

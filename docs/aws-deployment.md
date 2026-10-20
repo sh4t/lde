@@ -122,17 +122,18 @@ python3 server.py
 
 ### 1b. Test Basic Auth locally
 
-Generate a password hash:
+Generate a password hash (salted PBKDF2, the same format the AWS secret uses):
 
 ```bash
-python3 -c "import hashlib, json; print(json.dumps({'admin': hashlib.sha256(b'yourpassword').hexdigest()}))"
+python3 scripts/set_lde_password.py --no-aws --out ./.lde-basic-auth.json --plaintext-out ./.lde-admin.txt
+cat ./.lde-basic-auth.json   # {"admin":"pbkdf2_sha256$600000$..."}
 ```
 
-Set it in `.settings.json` (do NOT commit this):
+Set it in `.settings.json` (do NOT commit this; both files above are gitignored):
 
 ```json
 {
-  "basic_auth_credentials": "{\"admin\": \"<sha256_hex>\"}"
+  "basic_auth_credentials": {"admin": "pbkdf2_sha256$600000$..."}
 }
 ```
 
@@ -280,7 +281,7 @@ Two browser prompts. They do not share a password. Terraform does not create eit
 
 | Prompt | Username | What you type as the secret | Where it is stored |
 |---|---|---|---|
-| `https://lde.example.com` | The JSON key you choose. The commands below use `admin`. | The plaintext password you hashed. The browser does not want the hash. | `lde/basic-auth`, as `{"admin": "<sha256 hex>"}` |
+| `https://lde.example.com` | The JSON key you choose. The commands below use `admin`. | The plaintext password you hashed. The browser does not want the hash. | `lde/basic-auth`, as `{"admin": "pbkdf2_sha256$..."}` |
 | `https://dtrack.example.com` | `admin` | `admin` on the first visit, then the new password Dependency-Track asks you to set | Dependency-Track's database. Not `lde/basic-auth`. |
 
 Anything else is not a login for those prompts:

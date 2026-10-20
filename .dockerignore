@@ -32,6 +32,7 @@
 !backend/mocker.py
 !backend/ort_runner.py
 !backend/package_extractor.py
+!backend/passwords.py
 !backend/pipeline.py
 !backend/poetry_fallback.py
 !backend/prelock.py
