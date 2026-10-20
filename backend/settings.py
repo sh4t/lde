@@ -29,6 +29,11 @@ ALLOWED_KEYS = {
     'enabled_package_managers',
 }
 
+# Read from .settings.json and LDE_* env vars like ALLOWED_KEYS, but never
+# accepted by PUT /api/settings: the UI must not be able to change the login
+# that protects it. In AWS the Secrets Manager overlay sets it.
+FILE_ONLY_KEYS = {'basic_auth_credentials'}
+
 SENSITIVE_KEYS = {'github_pat', 'dtrack_api_key', 'gemini_api_key', 'basic_auth_credentials'}
 
 DEFAULTS = {
@@ -86,13 +91,14 @@ def load_settings():
     else:
         stored = {}
     merged = dict(DEFAULTS)
-    merged.update({k: v for k, v in stored.items() if k in ALLOWED_KEYS})
+    merged.update({k: v for k, v in stored.items()
+                   if k in ALLOWED_KEYS or k in FILE_ONLY_KEYS})
     # When LDE_SECRETS_SOURCE=aws, overlay values from AWS Secrets Manager.
     from . import secrets_loader
     secrets_loader.overlay(merged)
     # Allow any allowed key to be overridden via LDE_<KEY_UPPER> env var.
     # Useful for non-sensitive config (e.g. LDE_DTRACK_URL) in ECS task defs.
-    for key in ALLOWED_KEYS:
+    for key in ALLOWED_KEYS | FILE_ONLY_KEYS:
         env_val = os.environ.get('LDE_' + key.upper())
         if env_val is not None:
             merged[key] = env_val

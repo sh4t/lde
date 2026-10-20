@@ -1,12 +1,17 @@
-"""The LDE password file is a mode-0600 JSON object of username to sha256 hex."""
+"""The LDE password file is a mode-0600 JSON object of username to salted
+PBKDF2-HMAC-SHA256 hash (backend/passwords.py)."""
 
-import hashlib
 import importlib.util
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from backend import passwords  # noqa: E402
 
 
 def _load():
@@ -21,7 +26,7 @@ def _load():
 
 
 class SetLdePasswordTests(unittest.TestCase):
-    def test_writes_username_and_sha256_hex_mode_0600(self):
+    def test_writes_username_and_salted_pbkdf2_hash_mode_0600(self):
         mod = _load()
         with tempfile.TemporaryDirectory() as tmp:
             dest = os.path.join(tmp, "basic-auth.json")
@@ -29,8 +34,16 @@ class SetLdePasswordTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(dest).st_mode), 0o600)
             stored = json.loads(open(dest).read())
             self.assertEqual(list(stored), ["admin"])
-            self.assertEqual(stored["admin"], hashlib.sha256(b"correct horse").hexdigest())
+            self.assertTrue(stored["admin"].startswith(
+                f"pbkdf2_sha256${passwords.PBKDF2_ITERATIONS}$"))
+            self.assertTrue(passwords.verify_password("correct horse", stored["admin"]))
+            self.assertFalse(passwords.verify_password("correct horsf", stored["admin"]))
             self.assertNotIn("correct horse", open(dest).read())
+
+    def test_two_runs_never_write_the_same_hash(self):
+        mod = _load()
+        self.assertNotEqual(mod.credential_document("admin", "pw"),
+                            mod.credential_document("admin", "pw"))
 
     def test_rejects_an_empty_password(self):
         mod = _load()

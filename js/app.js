@@ -21,12 +21,19 @@ function dispatch() {
     const m = path.match(pattern);
     if (m) {
       try { handler(m); } catch (err) {
-        root.innerHTML = `<div class="card"><h2>Error</h2><pre class="log">${err.message}</pre></div>`;
+        root.innerHTML = `<div class="card"><h2>Error</h2><pre class="log">${escapeHtml(err.message)}</pre></div>`;
       }
       return;
     }
   }
-  root.innerHTML = `<div class="card"><h2>Not found</h2><p class="muted">${path}</p></div>`;
+  // The path comes from the address bar, so it is attacker-chosen text.
+  root.innerHTML = `<div class="card"><h2>Not found</h2><p class="muted">${escapeHtml(path)}</p></div>`;
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
 }
 
 export function navigate(path) {

@@ -26,5 +26,6 @@
   ],
   "_enabled_package_managers_note": "Remove 'GoMod' to skip Go analyses (often 15-25 min/repo cold). Same for Maven/Gradle if slow.",
   "ort_max_workers": 4,
-  "run_retention": 3
+  "run_retention": 3,
+  "_basic_auth_credentials_note": "Optional local login gate. Run `python3 scripts/set_lde_password.py --no-aws --out .lde-basic-auth.json` and paste the JSON object it writes as basic_auth_credentials, e.g. {\"admin\": \"pbkdf2_sha256$600000$...\"}. Not settable through PUT /api/settings. Omit it to serve without a password locally."
 }

@@ -189,12 +189,61 @@ class TestRequireAuthFailClosed(unittest.TestCase):
         creds = {'admin': _pw_hash(password)}
         handler, _ = _make_handler(auth_header=_valid_auth_header('admin', password))
 
+        from backend import passwords
+        passwords.clear_cache()
         with patch.dict(os.environ, {'LDE_SECRETS_SOURCE': 'aws'}, clear=False), \
              patch('server._get_basic_auth_creds', return_value=creds), \
-             patch('server.hmac.compare_digest', wraps=server.hmac.compare_digest) as cmp:
+             patch('backend.passwords.hmac.compare_digest',
+                   wraps=passwords.hmac.compare_digest) as cmp:
             self.assertTrue(handler._require_auth())
 
         cmp.assert_called_once()
+
+    # -- Salted PBKDF2 hashes (scripts/set_lde_password.py) --------------------
+
+    def test_pbkdf2_hash_allows_correct_and_denies_wrong_password(self):
+        import server
+        from backend import passwords
+
+        passwords.clear_cache()
+        creds = {'admin': passwords.hash_password('hunter2', iterations=1000)}
+        ok, _ = _make_handler(auth_header=_valid_auth_header('admin', 'hunter2'))
+        bad, _ = _make_handler(auth_header=_valid_auth_header('admin', 'hunter3'))
+        with patch.dict(os.environ, {'LDE_SECRETS_SOURCE': 'aws'}, clear=False), \
+             patch('server._get_basic_auth_creds', return_value=creds):
+            self.assertTrue(ok._require_auth())
+            self.assertFalse(bad._require_auth())
+        self.assertEqual(bad._sent_status, 401)
+
+    def test_legacy_sha256_hash_logs_one_warning(self):
+        import server
+        from backend import passwords
+
+        passwords.clear_cache()
+        server._legacy_hash_warned.clear()
+        creds = {'admin': _pw_hash('hunter2')}
+        with patch.dict(os.environ, {'LDE_SECRETS_SOURCE': 'aws'}, clear=False), \
+             patch('server._get_basic_auth_creds', return_value=creds), \
+             patch('server.logger') as mock_logger:
+            for _ in range(3):
+                handler, _ = _make_handler(auth_header=_valid_auth_header('admin', 'hunter2'))
+                self.assertTrue(handler._require_auth())
+        self.assertEqual(mock_logger.warning.call_count, 1)
+        self.assertIn('set_lde_password', mock_logger.warning.call_args[0][0])
+
+    def test_pbkdf2_hash_does_not_warn(self):
+        import server
+        from backend import passwords
+
+        passwords.clear_cache()
+        server._legacy_hash_warned.clear()
+        creds = {'admin': passwords.hash_password('hunter2', iterations=1000)}
+        handler, _ = _make_handler(auth_header=_valid_auth_header('admin', 'hunter2'))
+        with patch.dict(os.environ, {'LDE_SECRETS_SOURCE': 'aws'}, clear=False), \
+             patch('server._get_basic_auth_creds', return_value=creds), \
+             patch('server.logger') as mock_logger:
+            self.assertTrue(handler._require_auth())
+        mock_logger.warning.assert_not_called()
 
     # -- Non-AWS mode: valid creds still work ---------------------------------
 

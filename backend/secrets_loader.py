@@ -129,7 +129,7 @@ def _sign_and_fetch(secret_name):
     host = f'{service}.{_region}.amazonaws.com'
     endpoint = f'https://{host}/'
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     amz_date = now.strftime('%Y%m%dT%H%M%SZ')
     date_stamp = now.strftime('%Y%m%d')
 

@@ -2,8 +2,9 @@
 """Write the LDE basic-auth secret and keep the plaintext off the screen.
 
 Run this before terraform plan. It asks for a username and password, writes
-~/.lde/basic-auth.json as {"username": "<sha256 hex>"} mode 0600, and writes
-the plaintext to ~/.lde/lde-admin.txt mode 0600. Terraform reads the JSON on
+~/.lde/basic-auth.json as {"username": "pbkdf2_sha256$..."} mode 0600 (a salted
+PBKDF2-HMAC-SHA256 hash, see backend/passwords.py), and writes the plaintext to
+~/.lde/lde-admin.txt mode 0600. Terraform reads the JSON on
 the first apply. When lde/basic-auth already exists, the script stores that
 JSON with put-secret-value. LDE reads it within a minute.
 
@@ -14,11 +15,13 @@ password Dependency-Track asks you to set.
 
 import argparse
 import getpass
-import hashlib
 import json
 import os
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from backend import passwords  # noqa: E402
 
 DEFAULT_JSON = os.path.expanduser('~/.lde/basic-auth.json')
 DEFAULT_PLAINTEXT = os.path.expanduser('~/.lde/lde-admin.txt')
@@ -46,8 +49,7 @@ def _validate_credentials(username, password):
 
 def credential_document(username, password):
     username = _validate_credentials(username, password)
-    digest = hashlib.sha256(password.encode()).hexdigest()
-    return json.dumps({username: digest}, separators=(',', ':'))
+    return json.dumps({username: passwords.hash_password(password)}, separators=(',', ':'))
 
 
 def _write_0600(path, body):

@@ -97,8 +97,11 @@ def test_allowlist_skipped_for_internal_alb():
     ('lde/gemini-api-key', 'REPLACE_ME', 'WARN'),
     ('lde/gemini-api-key', 'k' * 39, 'OK'),
     ('lde/dtrack-api-key', 'REPLACE_ME', 'FAIL'),
-    ('lde/basic-auth', '{"admin": "' + 'a' * 64 + '"}', 'OK'),
+    ('lde/basic-auth', '{"admin": "' + 'a' * 64 + '"}', 'WARN'),  # legacy unsalted sha256
+    ('lde/basic-auth', '{"admin": "pbkdf2_sha256$600000$c2FsdA==$aGFzaA=="}', 'OK'),
     ('lde/basic-auth', '{"admin": "plaintext"}', 'FAIL'),
+    ('lde/basic-auth', '{"admin": "pbkdf2_sha256$x$c2FsdA==$aGFzaA=="}', 'FAIL'),
+    ('lde/basic-auth', '{}', 'FAIL'),
 ])
 def test_secret_shape(secret_id, value, level):
     got, message = ca.secret_shape(secret_id, value)

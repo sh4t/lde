@@ -27,7 +27,7 @@ Then go to **Ingest Dependencies**, enter an org name, and click **Start run**.
 | `github_pat` | GitHub fine-grained PAT (Contents: Read-only, Metadata: Read-only) |
 | `dtrack_url` | Dependency-Track API server URL (default: `http://localhost:8081`) |
 | `dtrack_ui_url` | Dependency-Track frontend URL for deep links (default: `http://localhost:8080`) |
-| `basic_auth_credentials` | JSON string `{"admin": "<sha256_hex>"}` — omit to disable auth in local dev |
+| `basic_auth_credentials` | JSON object `{"admin": "pbkdf2_sha256$..."}` written by `scripts/set_lde_password.py` — omit to disable auth in local dev |
 
 Settings are stored in `.settings.json` (gitignored). See `.settings.json.example` for all keys.
 In production, settings are injected via AWS Secrets Manager (`LDE_SECRETS_SOURCE=aws`).

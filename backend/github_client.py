@@ -27,8 +27,10 @@ _TIMEOUT = 30
 _RATELIMIT_BACKOFF_SECS = 30
 _MAX_RETRIES = 4
 
-# org / repo names: letters, digits, hyphen, underscore, dot — no path separators
-_ID_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+# org / repo names: letters, digits, hyphen, underscore, dot — no path
+# separators, and never a bare `.` or `..` (a URL path segment GitHub would
+# resolve away).
+_ID_RE = re.compile(r'^(?!\.+$)[A-Za-z0-9._-]+$')
 
 # Git branch names: allow path separators for namespaced branches
 # (e.g. release/1.2, feature/foo) but the value is always URL-encoded

@@ -81,7 +81,7 @@ variable "ecs_cluster_name" {
 }
 
 variable "lde_basic_auth_file" {
-  description = "JSON file {username: sha256_hex} written by scripts/set_lde_password.py. Empty uses ~/.lde/basic-auth.json. Plan fails when the file is missing."
+  description = "JSON file {username: pbkdf2_sha256$...} written by scripts/set_lde_password.py. Empty uses ~/.lde/basic-auth.json. Plan fails when the file is missing."
   type        = string
   default     = ""
 }

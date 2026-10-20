@@ -8,12 +8,15 @@ Returns a plain list of package name strings (one per package).
 """
 
 import concurrent.futures
+import functools
+import http.client
 import ipaddress
 import json
 import re
 import socket
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -26,31 +29,161 @@ logger = log_mod.get('pkg_extractor')
 # ---------------------------------------------------------------------------
 # SSRF protection
 # ---------------------------------------------------------------------------
+#
+# Every hop of a fetch (the URL the user gave and each redirect target) goes
+# through the same checks before a connection is opened:
+#
+#   1. the scheme is http or https and the port is in _ALLOWED_PORTS;
+#   2. the hostname resolves, and no resolved address is private, loopback,
+#      link-local, multicast, reserved, unspecified, or in 100.64.0.0/10 (the
+#      shared range cloud providers use for internal services);
+#   3. the connection goes to the address that was checked, not to a second
+#      DNS lookup, so a rebinding name cannot answer "public" to the check and
+#      "169.254.169.254" to the connect.
+#
+# A redirect is checked before it is followed. A response body is read up to
+# _MAX_RESPONSE_BYTES and refused above that.
+
+_ALLOWED_PORTS = frozenset({80, 443})
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network('100.64.0.0/10')
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_FETCH_TIMEOUT = 30
+
+
+def _check_ip(ip):
+    """Raise ValueError when *ip* (a str or ip_address) must not be contacted."""
+    addr = ipaddress.ip_address(ip)
+    candidates = [addr]
+    if addr.version == 6:
+        # An IPv4 address tunnelled inside IPv6 is checked as that IPv4 address.
+        teredo = addr.teredo
+        for embedded in (addr.ipv4_mapped, addr.sixtofour, teredo[1] if teredo else None):
+            if embedded is not None:
+                candidates.append(embedded)
+    for cand in candidates:
+        if (cand.is_private or cand.is_loopback or cand.is_link_local
+                or cand.is_reserved or cand.is_multicast or cand.is_unspecified
+                or (cand.version == 4 and cand in _SHARED_ADDRESS_SPACE)):
+            raise ValueError(f'blocked address {addr}')
+    return addr
+
+
+def _resolve_host(hostname, port):
+    """Return every IP address string *hostname* resolves to."""
+    try:
+        infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f'Cannot resolve hostname {hostname!r}: {exc}') from exc
+    return [sockaddr[0] for _family, _type, _proto, _canon, sockaddr in infos]
+
 
 def _validate_url(url):
-    """Raise ValueError if *url* targets a private/reserved/loopback address."""
+    """Check *url* and return the IP address to connect to.
+
+    Raises ValueError for a scheme other than http/https, a port outside
+    _ALLOWED_PORTS, a host that does not resolve, or any resolved address
+    that _check_ip rejects.
+    """
     parsed = urlparse(url)
     hostname = parsed.hostname
-    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-
     if not hostname:
         raise ValueError(f'URL has no hostname: {url}')
     if parsed.scheme not in ('http', 'https'):
         raise ValueError(f'URL scheme {parsed.scheme!r} is not allowed (only http/https)')
-    if port not in (80, 443):
+    try:
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    except ValueError as exc:
+        raise ValueError(f'URL port is invalid: {url}') from exc
+    if port not in _ALLOWED_PORTS:
         raise ValueError(f'URL port {port} is not allowed (only 80 and 443)')
 
-    try:
-        addrinfos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as exc:
-        raise ValueError(f'Cannot resolve hostname {hostname!r}: {exc}') from exc
+    addresses = _resolve_host(hostname, port)
+    if not addresses:
+        raise ValueError(f'Cannot resolve hostname {hostname!r}')
+    for ip in addresses:
+        try:
+            _check_ip(ip)
+        except ValueError:
+            raise ValueError(f'URL resolves to blocked address {ip} ({hostname})') from None
+    return addresses[0]
 
-    for _family, _type, _proto, _canon, sockaddr in addrinfos:
-        ip = ipaddress.ip_address(sockaddr[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            raise ValueError(f'URL resolves to blocked address {ip} ({hostname})')
 
-    return url
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connect to a pre-checked IP; the Host header keeps the hostname."""
+
+    def __init__(self, host, *args, pinned_ip, **kwargs):
+        super().__init__(host, *args, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Like _PinnedHTTPConnection; TLS is still verified against the hostname."""
+
+    def __init__(self, host, *args, pinned_ip, **kwargs):
+        super().__init__(host, *args, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self):
+        sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _SafeHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        ip = _validate_url(req.full_url)
+        if req.has_proxy():
+            # The proxy opens the connection; the destination was still checked.
+            return self.do_open(http.client.HTTPConnection, req)
+        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned_ip=ip), req)
+
+
+class _SafeHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        ip = _validate_url(req.full_url)
+        if req.has_proxy():
+            return self.do_open(http.client.HTTPSConnection, req, context=self._context)
+        return self.do_open(functools.partial(_PinnedHTTPSConnection, pinned_ip=ip), req,
+                            context=self._context)
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect to a blocked target before any request is sent to it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            _validate_url(newurl)
+        except ValueError as exc:
+            raise ValueError(f'Redirect refused: {exc}') from None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _build_opener():
+    """An opener whose every request, redirects included, is SSRF-checked."""
+    return urllib.request.build_opener(_SafeHTTPHandler, _SafeHTTPSHandler,
+                                       _SafeRedirectHandler)
+
+
+def _read_capped(resp, limit=None):
+    """Read at most *limit* bytes from *resp*; raise ValueError past that."""
+    if limit is None:
+        limit = _MAX_RESPONSE_BYTES
+    data = resp.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f'Response body larger than {limit // (1024 * 1024)} MB')
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +319,7 @@ _SPARSE_THRESHOLD = 200  # chars of visible text below which we retry with next 
 
 
 def _fetch_url(url):
-    """Fetch *url* with SSRF checks on initial and redirect URL.
+    """Fetch *url* with SSRF checks on the initial URL and on every redirect.
 
     Tries multiple user-agents in order, stopping at the first response that
     yields more than _SPARSE_THRESHOLD characters of visible text.  This handles
@@ -196,6 +329,7 @@ def _fetch_url(url):
     Returns the best HTML string found.
     """
     _validate_url(url)
+    opener = _build_opener()
     last_html = ''
     last_exc = None
     for ua in _USER_AGENTS:
@@ -204,11 +338,13 @@ def _fetch_url(url):
             'Accept': 'text/html,application/xhtml+xml,*/*',
         })
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.url != url:
-                    _validate_url(resp.url)
+            with opener.open(req, timeout=_FETCH_TIMEOUT) as resp:
+                raw = _read_capped(resp)
                 charset = resp.headers.get_content_charset() or 'utf-8'
-                html = resp.read().decode(charset, errors='replace')
+                try:
+                    html = raw.decode(charset, errors='replace')
+                except LookupError:
+                    html = raw.decode('utf-8', errors='replace')
         except urllib.error.URLError as exc:
             last_exc = exc
             continue
@@ -461,7 +597,8 @@ def _call_gemini(text, api_key, model='gemini-3.8-flash', part=None):
         },
     }).encode('utf-8')
 
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+    url = ('https://generativelanguage.googleapis.com/v1beta/models/'
+           f'{urllib.parse.quote(model, safe="")}:generateContent')
     req = urllib.request.Request(url, data=payload, headers={
         'Content-Type': 'application/json',
         'x-goog-api-key': api_key,
